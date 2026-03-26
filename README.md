@@ -68,6 +68,33 @@ steps3：进入目录使用镜像构建容器：
 `docker rm -f wxread && docker build -t wxread . && docker run -d --name wxread -v $(pwd)/logs:/app/logs --restart always wxread`<br>
 steps4：测试：`docker exec -it wxread python /app/main.py`
 
+### 方法三：青龙面板运行（推荐）
+
+- 青龙面板自动拉取仓库，配置环境变量后定时运行。
+
+**步骤：**
+1. 青龙面板 → 订阅管理 → 添加订阅
+   - 仓库地址：`https://github.com/hucongcong22/wxread.git`
+   - 分支：`main`
+   - 白名单：`wxread_qinglong.py`
+2. 青龙面板 → 环境变量 → 添加变量：
+
+| 名称 | 必填 | 说明 |
+|------|------|------|
+| `wxread_curl_bash` | 必选 | 抓包的 curl 命令 |
+| `wxread_read_num` | 可选 | 阅读次数，默认 40 次 (20 分钟) |
+| `wxread_push_method` | 可选 | 推送方式 (pushplus/wxpusher/telegram/serverchan) |
+| `wxread_pushplus_token` | 可选 | PushPlus token |
+| `wxpusher_spt` | 可选 | WxPusher token |
+| `telegram_bot_token` | 可选 | Telegram 机器人 token |
+| `telegram_chat_id` | 可选 | Telegram 聊天 ID |
+| `serverchan_spt` | 可选 | ServerChan sendkey |
+
+3. 青龙面板 → 定时任务 → 添加任务（如：每天 8:00 和 20:00 运行）
+   ```
+   0 8,20 * * *
+   ```
+
 ***
 ## Attention 📢
 
