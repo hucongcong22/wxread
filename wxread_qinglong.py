@@ -130,6 +130,11 @@ def log_error(msg):
     print(msg)
 
 
+def log_warning(msg):
+    logging.warning(msg)
+    print(msg)
+
+
 def encode_data(data):
     """数据编码"""
     return '&'.join(f"{k}={urllib.parse.quote(str(data[k]), safe='')}" for k in sorted(data.keys()))
@@ -153,13 +158,47 @@ def cal_hash(input_string):
 def get_wr_skey():
     """刷新 cookie 密钥"""
     try:
+        # 确保请求中包含 wr_skey
+        if 'wr_skey' not in cookies:
+            log_error("[错误] cookies 中缺少 wr_skey，请在 curl 命令中包含完整的 cookie")
+            log_info(f"当前 cookies: {cookies}")
+            return None
+
         response = requests.post(RENEW_URL, headers=headers, cookies=cookies,
                                  data=json.dumps(COOKIE_DATA, separators=(',', ':')), timeout=10)
-        for cookie in response.headers.get('Set-Cookie', '').split(';'):
-            if "wr_skey" in cookie:
-                return cookie.split('=')[-1][:8]
+
+        log_info(f"renewal 响应状态码：{response.status_code}")
+        log_info(f"renewal 响应内容：{response.text[:200]}")
+        set_cookie = response.headers.get('Set-Cookie', '')
+        log_info(f"Set-Cookie: {set_cookie}")
+
+        # 检查响应是否返回错误
+        try:
+            res_json = response.json()
+            if res_json.get('errCode') != 0 and 'succ' not in res_json:
+                log_error(f"[错误] renewal 请求失败：{res_json}")
+                log_error("[错误] cookie 已过期，请重新抓取 curl 命令！")
+                log_info("[提示] 操作方法：在浏览器中打开微信读书 -> F12 打开开发者工具 -> Network -> 刷新页面 -> 找到 /web/book/read 请求 -> 复制为 curl")
+                return None
+        except:
+            pass
+
+        if 'wr_skey=' in set_cookie:
+            for cookie_part in set_cookie.split(','):
+                if "wr_skey=" in cookie_part:
+                    wr_skey = cookie_part.split('wr_skey=')[1].split(';')[0].strip()
+                    # 检查是否为空
+                    if not wr_skey:
+                        log_error("[错误] 服务器返回空的 wr_skey，cookie 已失效")
+                        log_error("[错误] 请重新抓取 curl 命令更新 cookie")
+                        return None
+                    log_info(f"[成功] 获取到 wr_skey: {wr_skey}")
+                    return wr_skey[:8] if len(wr_skey) >= 8 else wr_skey
+        else:
+            log_error("[错误] Set-Cookie 中没有 wr_skey，可能是 cookie 已过期或 curl 命令不完整")
+            log_info(f"当前 cookies: {cookies}")
     except Exception as e:
-        log_error(f"❌ 获取 wr_skey 失败：{e}")
+        log_error(f"[错误] 获取 wr_skey 失败：{e}")
     return None
 
 
@@ -169,20 +208,29 @@ def fix_no_synckey():
         requests.post(FIX_SYNCKEY_URL, headers=headers, cookies=cookies,
                       data=json.dumps({"bookIds": ["3300060341"]}, separators=(',', ':')), timeout=10)
     except Exception as e:
-        log_error(f"❌ 修复 synckey 失败：{e}")
+        log_error(f"[错误] 修复 synckey 失败：{e}")
 
 
 def refresh_cookie():
     """刷新 cookie"""
-    log_info("🍪 刷新 cookie")
+    log_info("检查 cookie 状态...")
+
+    # 如果已经有 wr_skey，先尝试使用现有的
+    existing_skey = cookies.get('wr_skey')
+    if existing_skey:
+        log_info(f"使用现有 wr_skey: {existing_skey}")
+        return True
+
+    # 没有 wr_skey 时才尝试刷新
+    log_info("未检测到 wr_skey，尝试获取...")
     new_skey = get_wr_skey()
     if new_skey:
         cookies['wr_skey'] = new_skey
-        log_info(f"✅ 密钥刷新成功，新密钥：{new_skey}")
+        log_info(f"密钥刷新成功：{new_skey}")
         return True
     else:
-        log_error("❌ 无法获取新密钥或者 curl_bash 配置有误")
-        send_notify("❌ 微信读书运行失败：无法获取新密钥")
+        log_error("无法获取 wr_skey，curl_bash 可能已过期")
+        send_notify("微信读书运行失败：无法获取 wr_skey")
         return False
 
 
@@ -219,15 +267,15 @@ def send_notify(content):
                 timeout=10
             )
     except Exception as e:
-        log_error(f"❌ 推送失败：{e}")
+        log_error(f"[错误] 推送失败：{e}")
 
 
 def main():
     """主函数"""
     # 检查必要环境变量
     if not CURL_BASH:
-        log_error("❌ 缺少必要环境变量 wxread_curl_bash，请在青龙面板配置")
-        send_notify("❌ 微信读书运行失败：缺少 wxread_curl_bash 环境变量")
+        log_error("[错误] 缺少必要环境变量 wxread_curl_bash，请在青龙面板配置")
+        send_notify("[错误] 微信读书运行失败：缺少 wxread_curl_bash 环境变量")
         return
 
     # 刷新 cookie
@@ -236,7 +284,7 @@ def main():
 
     index = 1
     last_time = int(time.time()) - 30
-    log_info(f"⏱️ 一共需要阅读 {READ_NUM} 次...")
+    log_info(f"一共需要阅读 {READ_NUM} 次...")
 
     while index <= READ_NUM:
         data.pop('s', None)
@@ -250,7 +298,7 @@ def main():
         data['sg'] = hashlib.sha256(f"{data['ts']}{data['rn']}{KEY}".encode()).hexdigest()
         data['s'] = cal_hash(encode_data(data))
 
-        log_info(f"⏱️ 尝试第 {index} 次阅读...")
+        log_info(f"尝试第 {index} 次阅读...")
 
         try:
             response = requests.post(
@@ -261,29 +309,29 @@ def main():
                 timeout=10
             )
             res_data = response.json()
-            log_info(f"📕 响应：{res_data}")
+            log_info(f"响应：{res_data}")
 
             if 'succ' in res_data:
                 if 'synckey' in res_data:
                     last_time = this_time
                     index += 1
                     time.sleep(30)
-                    log_info(f"✅ 阅读成功，阅读进度：{(index - 1) * 0.5} 分钟")
+                    log_info(f"阅读成功，阅读进度：{(index - 1) * 0.5} 分钟")
                 else:
-                    log_warning("❌ 无 synckey, 尝试修复...")
+                    log_warning("[警告] 无 synckey, 尝试修复...")
                     fix_no_synckey()
             else:
-                log_error("❌ cookie 已过期，尝试刷新...")
+                log_error("[错误] cookie 已过期，尝试刷新...")
                 if not refresh_cookie():
                     return
         except Exception as e:
-            log_error(f"❌ 请求失败：{e}")
+            log_error(f"[错误] 请求失败：{e}")
             time.sleep(5)
 
     total_minutes = (index - 1) * 0.5
-    log_info("🎉 阅读脚本已完成！")
-    log_info(f"⏱️ 总阅读时长：{total_minutes} 分钟")
-    send_notify(f"🎉 微信读书自动阅读完成！\n⏱️ 阅读时长：{total_minutes}分钟")
+    log_info("阅读脚本已完成！")
+    log_info(f"总阅读时长：{total_minutes} 分钟")
+    send_notify(f"微信读书自动阅读完成！\n总阅读时长：{total_minutes}分钟")
 
 
 if __name__ == "__main__":
