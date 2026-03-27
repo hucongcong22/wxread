@@ -120,19 +120,17 @@ else:
 data = DEFAULT_DATA.copy()
 
 
+# 青龙环境已经有日志系统，只使用 logging 即可
 def log_info(msg):
     logging.info(msg)
-    print(msg)
 
 
 def log_error(msg):
     logging.error(msg)
-    print(msg)
 
 
 def log_warning(msg):
     logging.warning(msg)
-    print(msg)
 
 
 def encode_data(data):
@@ -211,18 +209,24 @@ def fix_no_synckey():
         log_error(f"[错误] 修复 synckey 失败：{e}")
 
 
-def refresh_cookie():
-    """刷新 cookie"""
+def refresh_cookie(force=False):
+    """刷新 cookie
+    force: 是否强制刷新（即使已有 wr_skey）
+    """
     log_info("检查 cookie 状态...")
 
-    # 如果已经有 wr_skey，先尝试使用现有的
+    # 如果已经有 wr_skey 且不是强制刷新，先尝试使用现有的
     existing_skey = cookies.get('wr_skey')
-    if existing_skey:
+    if existing_skey and not force:
         log_info(f"使用现有 wr_skey: {existing_skey}")
         return True
 
-    # 没有 wr_skey 时才尝试刷新
-    log_info("未检测到 wr_skey，尝试获取...")
+    # 强制刷新或没有 wr_skey 时尝试获取
+    if force:
+        log_info("强制刷新 wr_skey...")
+    else:
+        log_info("未检测到 wr_skey，尝试获取...")
+    
     new_skey = get_wr_skey()
     if new_skey:
         cookies['wr_skey'] = new_skey
@@ -230,7 +234,7 @@ def refresh_cookie():
         return True
     else:
         log_error("无法获取 wr_skey，curl_bash 可能已过期")
-        send_notify("微信读书运行失败：无法获取 wr_skey")
+        send_notify("微信读书运行失败：无法获取 wr_skey，请重新抓取 curl 命令")
         return False
 
 
@@ -270,6 +274,33 @@ def send_notify(content):
         log_error(f"[错误] 推送失败：{e}")
 
 
+def health_check():
+    """健康检查：验证 cookie 是否有效"""
+    log_info("[健康检查] 验证 cookie 有效性...")
+    try:
+        test_data = DEFAULT_DATA.copy()
+        test_data['ts'] = int(time.time() * 1000)
+        test_data['ct'] = int(time.time())
+        test_data['rn'] = random.randint(0, 999)
+        test_data['sg'] = hashlib.sha256(f"{test_data['ts']}{test_data['rn']}{KEY}".encode()).hexdigest()
+        test_data['s'] = cal_hash(encode_data(test_data))
+        
+        response = requests.post(READ_URL, headers=headers, cookies=cookies, 
+                                 data=json.dumps(test_data, separators=(',', ':')), timeout=10)
+        res_data = response.json()
+        
+        if 'succ' in res_data or res_data.get('errCode') == 0:
+            log_info("[健康检查] ✅ cookie 有效")
+            return True
+        else:
+            err_code = res_data.get('errCode', 'unknown')
+            log_warning(f"[健康检查] ⚠️ cookie 可能已过期 (错误码：{err_code})")
+            return False
+    except Exception as e:
+        log_error(f"[健康检查] ❌ 检查失败：{e}")
+        return False
+
+
 def main():
     """主函数"""
     # 检查必要环境变量
@@ -278,36 +309,88 @@ def main():
         send_notify("[错误] 微信读书运行失败：缺少 wxread_curl_bash 环境变量")
         return
 
-    # 刷新 cookie
-    if not refresh_cookie():
-        return
+    # 健康检查
+    if not health_check():
+        log_info("[提示] cookie 可能已过期，尝试刷新...")
+        if not refresh_cookie(force=True):
+            send_notify("[错误] 微信读书运行失败：cookie 无效且无法刷新，请重新抓取 curl 命令")
+            return
+        # 刷新后再次检查
+        if not health_check():
+            send_notify("[错误] 微信读书运行失败：cookie 刷新后仍然无效，请重新抓取 curl 命令")
+            return
+
+    log_info("[健康检查] ✅ 验证通过，开始阅读任务...")
 
     index = 1
-    last_time = int(time.time()) - 30
+    last_time = int(time.time()) - random.randint(25, 35)
     log_info(f"一共需要阅读 {READ_NUM} 次...")
+
+    # 固定一本书阅读，减少风控风险
+    current_book = random.choice(BOOK_IDS)
+    current_chapter = random.choice(CHAPTER_IDS)
+    chapter_index = 0
+    
+    # cookie 刷新重试计数器，最多尝试 3 次
+    refresh_retry_count = 0
+    max_refresh_retry = 3
 
     while index <= READ_NUM:
         data.pop('s', None)
-        data['b'] = random.choice(BOOK_IDS)
-        data['c'] = random.choice(CHAPTER_IDS)
+        
+        # 每 4 次切换一次章节，模拟真实阅读行为
+        if index % 4 == 0:
+            chapter_index = (chapter_index + 1) % len(CHAPTER_IDS)
+            current_chapter = CHAPTER_IDS[chapter_index]
+            # 每 50 次切换一次书籍
+            if index % 50 == 0:
+                current_book = random.choice(BOOK_IDS)
+        
+        data['b'] = current_book
+        data['c'] = current_chapter
+        
         this_time = int(time.time())
+        # 阅读时间间隔加入随机性（25-40 秒），更像真人
+        read_interval = random.randint(25, 40)
         data['ct'] = this_time
         data['rt'] = this_time - last_time
-        data['ts'] = int(this_time * 1000) + random.randint(0, 1000)
-        data['rn'] = random.randint(0, 1000)
+        data['ts'] = int(this_time * 1000) + random.randint(0, 999)
+        data['rn'] = random.randint(0, 999)
         data['sg'] = hashlib.sha256(f"{data['ts']}{data['rn']}{KEY}".encode()).hexdigest()
         data['s'] = cal_hash(encode_data(data))
 
         log_info(f"尝试第 {index} 次阅读...")
 
         try:
-            response = requests.post(
-                READ_URL,
-                headers=headers,
-                cookies=cookies,
-                data=json.dumps(data, separators=(',', ':')),
-                timeout=10
-            )
+            # 请求重试机制，最多重试 2 次
+            request_retry = 0
+            max_request_retry = 2
+            response = None
+            
+            while request_retry < max_request_retry:
+                try:
+                    response = requests.post(
+                        READ_URL,
+                        headers=headers,
+                        cookies=cookies,
+                        data=json.dumps(data, separators=(',', ':')),
+                        timeout=10
+                    )
+                    if response.status_code == 200:
+                        break
+                    else:
+                        log_warning(f"[请求] 状态码异常：{response.status_code}，重试中... ({request_retry + 1}/{max_request_retry})")
+                except requests.exceptions.RequestException as e:
+                    log_warning(f"[请求] 网络异常：{e}，重试中... ({request_retry + 1}/{max_request_retry})")
+                
+                request_retry += 1
+                time.sleep(2)
+            
+            if response is None:
+                log_error("[错误] 请求失败，已达最大重试次数")
+                time.sleep(5)
+                continue
+                
             res_data = response.json()
             log_info(f"响应：{res_data}")
 
@@ -315,17 +398,40 @@ def main():
                 if 'synckey' in res_data:
                     last_time = this_time
                     index += 1
-                    time.sleep(30)
+                    # 阅读间隔加入随机性
+                    sleep_time = read_interval + random.randint(-5, 10)
+                    time.sleep(max(20, sleep_time))
                     log_info(f"阅读成功，阅读进度：{(index - 1) * 0.5} 分钟")
+                    # 成功后重置刷新计数器
+                    refresh_retry_count = 0
                 else:
                     log_warning("[警告] 无 synckey, 尝试修复...")
                     fix_no_synckey()
+                    time.sleep(5)
             else:
-                log_error("[错误] cookie 已过期，尝试刷新...")
-                if not refresh_cookie():
-                    return
+                err_code = res_data.get('errCode', 'unknown')
+                log_error(f"[错误] 请求失败，错误码：{err_code}")
+                
+                # 登录超时或 cookie 过期
+                if err_code == -2012 or err_code in [1001, 1003, -1]:
+                    refresh_retry_count += 1
+                    log_error(f"[错误] cookie 已过期，尝试刷新... (第{refresh_retry_count}次/{max_refresh_retry}次)")
+                    
+                    if refresh_retry_count >= max_refresh_retry:
+                        log_error(f"[错误] cookie 刷新已达最大尝试次数 ({max_refresh_retry}次)，停止运行")
+                        send_notify(f"微信读书运行失败：cookie 已过期，刷新 {max_refresh_retry} 次仍失败，请重新抓取 curl 命令\n错误码：{err_code}")
+                        return
+                    
+                    if not refresh_cookie(force=True):
+                        log_error(f"[错误] cookie 刷新失败，当前重试次数：{refresh_retry_count}/{max_refresh_retry}")
+                        continue
+                    
+                    # 刷新成功后等待几秒再继续
+                    log_info("cookie 刷新成功，重试当前请求...")
+                    time.sleep(3)
+                    continue
         except Exception as e:
-            log_error(f"[错误] 请求失败：{e}")
+            log_error(f"[错误] 请求异常：{e}")
             time.sleep(5)
 
     total_minutes = (index - 1) * 0.5
